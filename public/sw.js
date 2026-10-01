@@ -1,24 +1,23 @@
-const CACHE_NAME = 'astra-ai-cache-v1';
-const urlsToCache = [
-  '/',
-  '/index.html',
-  '/manifest.json',
-  '/vite.svg',
-  // Add other static assets as needed
-];
+// AstraAI no longer uses a caching service worker.
+// Keep this file only so browsers with an older AstraAI worker can update it
+// and remove the old cache safely.
 
-self.addEventListener('install', (event) => {
+const OLD_CACHES = ['astra-ai-cache-v1'];
+
+self.addEventListener('install', () => {
+  self.skipWaiting();
+});
+
+self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then((cache) => cache.addAll(urlsToCache))
+    Promise.all([
+      ...OLD_CACHES.map((name) => caches.delete(name)),
+      self.clients.claim(),
+    ])
   );
 });
 
 self.addEventListener('fetch', (event) => {
-  event.respondWith(
-    caches.match(event.request)
-      .then((response) => {
-        return response || fetch(event.request);
-      })
-  );
+  // Never cache or replace application requests.
+  event.respondWith(fetch(event.request));
 });
