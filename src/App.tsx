@@ -10,13 +10,15 @@ import { useLocalStorage } from './utils/localStorage';
 
 function App() {
   const [onboardingCompleted] = useLocalStorage('onboardingCompleted', false);
-  console.log('onboardingCompleted:', onboardingCompleted);
 
   return (
     <BrowserRouter>
-      <div className="app" style={{border: '2px solid red', minHeight: '100vh'}}>
+      <div className="app min-h-screen">
         {!onboardingCompleted ? (
-          <Navigate replace to="/onboarding" />
+          <Routes>
+            <Route path="/onboarding" element={<Onboarding />} />
+            <Route path="*" element={<Navigate replace to="/onboarding" />} />
+          </Routes>
         ) : (
           <>
             <Routes>
@@ -26,6 +28,7 @@ function App() {
               <Route path="/flashcards" element={<Flashcards />} />
               <Route path="/quiz" element={<Quiz />} />
               <Route path="/settings" element={<Settings />} />
+              <Route path="*" element={<Navigate replace to="/" />} />
             </Routes>
             <BottomNav />
           </>
