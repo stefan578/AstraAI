@@ -164,22 +164,6 @@ Ako učenik postavi pitanje, pruži detaljan odgovor koji objašnjava ne samo �
     setCurrentConversationId(newConv.id);
   };
 
-  const deleteConversation = (id: string) => {
-    if (conversations.length <= 1) {
-      alert('Ne možete obrisati poslednji razgovor.');
-      return;
-    }
-    if (!window.confirm('Da li ste sigurni da želite da obrišete ovaj razgovor?')) {
-      return;
-    }
-    const remaining = conversations.filter(conv => conv.id !== id);
-    setConversations(remaining);
-    if (currentConversationId === id) {
-      const sorted = [...remaining].sort((a, b) => b.updatedAt - a.updatedAt);
-      setCurrentConversationId(sorted[0]?.id || null);
-    }
-  };
-
   return (
     <div className="container min-h-[80vh] py-6">
       <header className="mb-4">
