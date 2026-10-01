@@ -9,6 +9,7 @@ const Chat: React.FC = () => {
     initializing,
     error,
     generateText,
+    analyzeImage,
   } = useAI();
   const [conversations, setConversations] = useLocalStorage('conversations', [] as Array<any>);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
@@ -17,7 +18,6 @@ const Chat: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Load current conversation or create a new one if none exists
   useEffect(() => {
     if (conversations.length === 0) {
       const newConversation = {
@@ -30,7 +30,6 @@ const Chat: React.FC = () => {
       setConversations([newConversation]);
       setCurrentConversationId(newConversation.id);
     } else if (!currentConversationId) {
-      // Set to the most recent conversation
       const sorted = [...conversations].sort((a, b) => b.updatedAt - a.updatedAt);
       setCurrentConversationId(sorted[0].id);
     }
@@ -38,7 +37,6 @@ const Chat: React.FC = () => {
 
   const currentConversation = conversations.find(c => c.id === currentConversationId) || null;
 
-  // Scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [currentConversation?.messages]);
@@ -46,30 +44,31 @@ const Chat: React.FC = () => {
   const sendMessage = async () => {
     if (!input.trim() && !imageUrl) return;
     if (!aiService) {
-      alert('AI servis nije disponibilan. Proveri podešavanja.');
+      alert('AI servis nije dostupan. Proveri podešavanja.');
       return;
     }
 
+    const imageForRequest = imageUrl;
+    const textForRequest = input.trim();
     const userMessage = {
       id: uuidv4(),
       role: 'user',
-      content: input,
-      image: imageUrl ? { url: imageUrl } : undefined,
+      content: textForRequest,
+      image: imageForRequest ? { url: imageForRequest } : undefined,
       timestamp: Date.now(),
     };
 
-    // Add user message to current conversation
     const updatedConversations = conversations.map(conv =>
       conv.id === currentConversationId
         ? {
             ...conv,
             messages: [...conv.messages, userMessage],
             updatedAt: Date.now(),
-            // Update title if it's the first message and title is default
             title:
               conv.messages.length === 0 && conv.title === 'Novi razgovor'
-                ? input.substring(0, 30) + (input.length > 30 ? '...' : '')
-                : conv.title
+                ? textForRequest.substring(0, 30) + (textForRequest.length > 30 ? '...' : '') ||
+                  'Slika'
+                : conv.title,
           }
         : conv
     );
@@ -78,34 +77,27 @@ const Chat: React.FC = () => {
     setInput('');
     setImageUrl(null);
 
-    // Find the updated conversation to get the full message history
-    const updatedConv = updatedConversations.find(
-      c => c.id === currentConversationId
-    )!;
-
-    // Prepare messages for AI (convert to format expected by AI service)
-    const formattedMessages = updatedConv.messages.map((msg: any) => ({
-      role: msg.role,
-      content: msg.image ? `[Slika attached] ${msg.content}` : msg.content,
-    }));
-
     try {
       setIsLoading(true);
-      // Generate AI response
-      const systemPrompt = `
-        Ti si AI asistent za učenje koji govori srpskim jezikom.
-        Tvoj cilj je da pomogneš učenicima da razumeju koncepte, reše problemi i unaprede svoje znanje.
-        Objasni jasno, uz primere, i korak po korak kada je potrebno.
-        Ako učenik postavi pitanje, pruži detaljan odgovor koji obrazjašnjava ne samo "šta" već i "zašto".
-        Ako se pitanje odnosi na sliku, opisuj šta vidiš na slici i veži sa kontekstom pitanja.
-        Ne pretvaraj da znáš informacije koje ti nisu date u pitanju ili na slici.
-      `;
 
-      const lastUserMessage = formattedMessages[formattedMessages.length - 1];
-      const aiResponse = await generateText(
-        lastUserMessage.content,
-        systemPrompt
-      );
+      const systemPrompt = `
+Ti si AI asistent za učenje koji govori srpskim jezikom.
+Tvoj cilj je da pomogneš učenicima da razumeju koncepte, reše probleme i unaprede svoje znanje.
+Objasni jasno, uz primere, i korak po korak kada je potrebno.
+Ako učenik postavi pitanje, pruži detaljan odgovor koji objašnjava ne samo „šta“ već i „zašto“.
+`;
+
+      let aiResponse: string;
+
+      if (imageForRequest) {
+        aiResponse = await analyzeImage(
+          imageForRequest,
+          textForRequest ||
+            'Analiziraj ovu sliku i objasni učeniku šta se na njoj nalazi. Ako je zadatak, reši ga korak po korak.'
+        );
+      } else {
+        aiResponse = await generateText(textForRequest, systemPrompt);
+      }
 
       const aiMessage = {
         id: uuidv4(),
@@ -114,9 +106,8 @@ const Chat: React.FC = () => {
         timestamp: Date.now(),
       };
 
-      // Add AI message to conversation
       setConversations(
-        conversations.map(conv =>
+        updatedConversations.map(conv =>
           conv.id === currentConversationId
             ? {
                 ...conv,
@@ -130,7 +121,7 @@ const Chat: React.FC = () => {
       console.error('Error generating AI response:', err);
       alert(
         'Došlo je do greške pri generisanju odgovora. ' +
-          'Proveri internet vezu i API ključ.'
+          (err instanceof Error ? err.message : 'Proveri internet vezu i API ključ.')
       );
     } finally {
       setIsLoading(false);
@@ -146,9 +137,17 @@ const Chat: React.FC = () => {
       return;
     }
 
+    if (file.size > 10 * 1024 * 1024) {
+      alert('Slika je prevelika. Maksimalna veličina je 10 MB.');
+      return;
+    }
+
     const reader = new FileReader();
     reader.onload = (event) => {
-      setImageUrl(event.target?.result as string);
+      const result = event.target?.result;
+      if (typeof result === 'string') {
+        setImageUrl(result);
+      }
     };
     reader.readAsDataURL(file);
   };
@@ -167,18 +166,16 @@ const Chat: React.FC = () => {
 
   const deleteConversation = (id: string) => {
     if (conversations.length <= 1) {
-      alert('Ne możete obrisati poslednji razgovor.');
+      alert('Ne možete obrisati poslednji razgovor.');
       return;
     }
-    if (!window.confirm('Da li ste sigurni da želite da obrisete ovaj razgovor?')) {
+    if (!window.confirm('Da li ste sigurni da želite da obrišete ovaj razgovor?')) {
       return;
     }
-    setConversations(conversations.filter(conv => conv.id !== id));
+    const remaining = conversations.filter(conv => conv.id !== id);
+    setConversations(remaining);
     if (currentConversationId === id) {
-      // Switch to the most recent remaining conversation
-      const sorted = [...conversations]
-        .filter(conv => conv.id !== id)
-        .sort((a, b) => b.updatedAt - a.updatedAt);
+      const sorted = [...remaining].sort((a, b) => b.updatedAt - a.updatedAt);
       setCurrentConversationId(sorted[0]?.id || null);
     }
   };
@@ -188,40 +185,34 @@ const Chat: React.FC = () => {
       <header className="mb-4">
         <h1 className="text-xl font-semibold">Chat sa AI</h1>
         {currentConversation && (
-          <p className="text-gray-600 text-sm">
-            {currentConversation.title}
-          </p>
+          <p className="text-gray-600 text-sm">{currentConversation.title}</p>
         )}
       </header>
 
-      {/* AI Status */}
       {initializing && (
         <div className="card mb-4">
           <div className="flex items-center">
-            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-indigo-500 mr-3"></div>
+            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-indigo-500 mr-3" />
             <span>Inicijalizacija AI servisa...</span>
           </div>
         </div>
       )}
+
       {error && (
         <div className="card mb-4 bg-red-50">
           <div className="flex items-start">
-            <div className="flex-shrink-0">
-              {/* Warning icon */}
-              <span className="text-red-500 mt-0.5 h-5 w-5">⚠️</span>
-            </div>
+            <span className="text-red-500 mt-0.5 h-5 w-5">⚠️</span>
             <div className="ml-3">
               <h3 className="text-sm font-medium text-red-800">Greška</h3>
-              <div className="mt-1 text-sm text-red-700">{error}</div>
+              <div className="mt-1 text-sm text-red-700 break-words">{error}</div>
             </div>
           </div>
         </div>
       )}
 
-      {/* Chat Messages */}
       {currentConversation ? (
         <div className="flex-1 overflow-y-auto mb-4">
-          <div className="mb-6" ref={messagesEndRef}></div>
+          <div className="mb-6" ref={messagesEndRef} />
           {currentConversation.messages.map((msg: any) => (
             <div
               key={msg.id}
@@ -238,7 +229,7 @@ const Chat: React.FC = () => {
                   />
                 </div>
               ) : null}
-              <p className="mb-1">{msg.content}</p>
+              <p className="mb-1 whitespace-pre-wrap">{msg.content}</p>
               <span className="text-xs text-gray-500">
                 {new Date(msg.timestamp).toLocaleTimeString([], {
                   hour: '2-digit',
@@ -254,87 +245,69 @@ const Chat: React.FC = () => {
         </p>
       )}
 
-      {/* Input Area */}
       <div className="card pb-4">
         <div className="flex items-start">
           <div className="flex-shrink-0">
-            <label className="cursor-pointer">
+            <label className="btn-outline cursor-pointer">
+              Dodaj sliku
               <input
                 type="file"
                 accept="image/*"
-                onChange={handleImageChange}
                 className="hidden"
+                onChange={handleImageChange}
               />
-              {/* Image icon */}
-              <span className={imageUrl ? 'text-indigo-500' : 'text-gray-400'} hover:text-indigo-500>
-                📎
-              </span>
             </label>
           </div>
-          <div className="flex-1">
-            <textarea
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Poruka AI..."
-              rows={2}
-              className="input w-full resize-none"
-              disabled={isLoading}
-            />
-          </div>
+          {imageUrl && (
+            <div className="ml-3 relative">
+              <img
+                src={imageUrl}
+                alt="Pregled slike"
+                className="h-16 w-16 object-cover rounded"
+              />
+              <button
+                type="button"
+                onClick={() => setImageUrl(null)}
+                className="absolute -top-2 -right-2 rounded-full bg-red-500 text-white w-6 h-6"
+                aria-label="Ukloni sliku"
+              >
+                ×
+              </button>
+            </div>
+          )}
         </div>
-        <div className="mt-2 flex justify-end">
+
+        <div className="mt-3 flex items-end gap-3">
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Napiši pitanje..."
+            className="input flex-1 min-h-24 resize-none"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                void sendMessage();
+              }
+            }}
+          />
           <button
-            onClick={sendMessage}
+            type="button"
+            onClick={() => void sendMessage()}
             disabled={isLoading || (!input.trim() && !imageUrl)}
             className="btn-primary"
           >
-            {isLoading ? 'Šalje se...' : 'Pošalji'}
+            {isLoading ? 'Šaljem...' : 'Pošalji'}
           </button>
         </div>
-      </div>
 
-      {/* Conversation List (mobile: we'll show as a modal or separate page, but for simplicity we'll show as a sidebar on desktop) */}
-      {/* For mobile, we could use a bottom sheet, but we'll keep it simple and show as a list on the left in larger screens */}
-      <div className="hidden md:block mt-6">
-        <div className="card">
-          <h3 className="font-medium mb-3">Razgovori</h3>
-          <div className="space-y-2">
-            {conversations.map((conv) => (
-              <div
-                key={conv.id}
-                onClick={() => setCurrentConversationId(conv.id)}
-                className={`p-3 cursor-pointer rounded hover:bg-gray-50 ${
-                  currentConversationId === conv.id
-                    ? 'bg-indigo-50 border-l-4 border-indigo-500'
-                    : ''
-                }`}
-              >
-                <div className="font-medium">{conv.title}</div>
-                <div className="text-xs text-gray-500">
-                  {new Date(conv.updatedAt).toLocaleString()}
-                </div>
-                <div className="mt-1 flex items-center gap-2">
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteConversation(conv.id);
-                    }}
-                    className="text-gray-400 hover:text-gray-600"
-                  >
-                    🗑️
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-          <div className="mt-3">
-            <button
-              onClick={newConversation}
-              className="btn-outline w-full"
-            >
-              Novi razgovor
-            </button>
-          </div>
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={newConversation}
+            className="btn-outline w-full"
+          >
+            Novi razgovor
+          </button>
         </div>
       </div>
     </div>
