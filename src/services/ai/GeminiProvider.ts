@@ -1,18 +1,50 @@
 import type { AIService, ProviderConfig } from './AIService';
 
+type GeminiResponse = {
+  candidates?: Array<{
+    content?: {
+      parts?: Array<{ text?: string }>;
+    };
+  }>;
+  error?: {
+    message?: string;
+  };
+};
+
 export class GeminiProvider implements AIService {
-  private apiKey: string;
-  private model: string;
+  private readonly apiKey: string;
+  private readonly model: string;
   private readonly baseUrl = 'https://generativelanguage.googleapis.com/v1beta/models';
 
   constructor(config: ProviderConfig) {
-    this.apiKey = config.apiKey;
-    this.model = config.model || 'models/gemini-1.5-flash-latest'; // Default to a commonly available model
+    this.apiKey = config.apiKey.trim();
+    this.model = GeminiProvider.normalizeModel(config.model);
   }
 
-  private async fetchGemini(endpoint: string, payload: any): Promise<any> {
+  private static normalizeModel(model?: string): string {
+    const requested = (model || '').trim().replace(/^models\//, '');
+
+    // Migrate old AstraAI/localStorage values that are no longer suitable
+    // for new Gemini API projects.
+    if (
+      !requested ||
+      requested === 'gemini-1.5-flash-latest' ||
+      requested === 'gemini-1.5-flash' ||
+      requested === 'gemini-2.5-flash'
+    ) {
+      return 'gemini-3.8-flash';
+    }
+
+    return requested;
+  }
+
+  private async fetchGemini(endpoint: string, payload: unknown): Promise<GeminiResponse> {
+    if (!this.apiKey) {
+      throw new Error('Gemini API ključ nije podešen.');
+    }
+
     const response = await fetch(
-      `${this.baseUrl}/${this.model}:${endpoint}?key=${this.apiKey}`,
+      `${this.baseUrl}/${this.model}:${endpoint}?key=${encodeURIComponent(this.apiKey)}`,
       {
         method: 'POST',
         headers: {
@@ -22,207 +54,166 @@ export class GeminiProvider implements AIService {
       }
     );
 
+    const data = (await response.json().catch(() => ({}))) as GeminiResponse;
+
     if (!response.ok) {
-      const errorData = await response.json();
       throw new Error(
-        errorData.error?.message || 'Gemini API request failed'
+        data.error?.message || `Gemini API zahtev nije uspeo (HTTP ${response.status}).`
       );
     }
 
-    return response.json();
+    return data;
   }
 
-  async generateText(prompt: string, systemPrompt: string = ''): Promise<string> {
-    const fullPrompt = systemPrompt ? `${systemPrompt}\n\n${prompt}` : prompt;
-    const payload = {
-      contents: [{
-        parts: [{ text: fullPrompt }]
-      }],
+  private extractText(data: GeminiResponse): string {
+    const text = data.candidates?.[0]?.content?.parts
+      ?.map((part) => part.text || '')
+      .join('')
+      .trim();
+
+    if (!text) {
+      throw new Error('Gemini nije vratio tekstualni odgovor.');
+    }
+
+    return text;
+  }
+
+  private async generate(prompt: string, systemPrompt = '', maxOutputTokens = 2048): Promise<string> {
+    const contents = [
+      ...(systemPrompt
+        ? [{ role: 'user', parts: [{ text: `Sistemska instrukcija: ${systemPrompt}` }] }]
+        : []),
+      {
+        role: 'user',
+        parts: [{ text: prompt }],
+      },
+    ];
+
+    const data = await this.fetchGemini('generateContent', {
+      contents,
       generationConfig: {
         temperature: 0.7,
         topK: 40,
         topP: 0.95,
-        maxOutputTokens: 2048,
+        maxOutputTokens,
       },
-    };
+    });
 
-    const data = await this.fetchGemini('generateContent', payload);
-    return data.candidates[0].content.parts[0].text;
+    return this.extractText(data);
   }
 
-  async analyzeImage(imageBase64: string, prompt: string = 'Opiši sta vidis na slici.'): Promise<string> {
-    const payload = {
-      contents: [{
-        parts: [
-          { text: prompt },
-          {
-            inlineData: {
-              mimeType: 'image/jpeg', // Assuming jpeg, but could be png etc.
-              data: imageBase64,
-            }
-          }
-        ]
-      }],
+  async generateText(prompt: string, systemPrompt = ''): Promise<string> {
+    return this.generate(prompt, systemPrompt, 2048);
+  }
+
+  async analyzeImage(
+    imageBase64: string,
+    prompt = 'Opiši šta vidiš na slici i objasni relevantne informacije za učenika.'
+  ): Promise<string> {
+    const match = imageBase64.match(/^data:([^;]+);base64,(.+)$/);
+    const mimeType = match?.[1] || 'image/jpeg';
+    const data = match?.[2] || imageBase64;
+
+    const response = await this.fetchGemini('generateContent', {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: prompt },
+            {
+              inlineData: {
+                mimeType,
+                data,
+              },
+            },
+          ],
+        },
+      ],
       generationConfig: {
         temperature: 0.2,
         topK: 40,
         topP: 0.95,
-        maxOutputTokens: 1024,
+        maxOutputTokens: 2048,
       },
-    };
+    });
 
-    const data = await this.fetchGemini('generateContent', payload);
-    return data.candidates[0].content.parts[0].text;
+    return this.extractText(response);
   }
 
-  async generateFlashcards(content: string): Promise<Array<{front: string; back: string}>> {
-    const prompt = `
-      Na osnovu sledećeg sadržaja, kreiraj 5-10 flesh kartica za učenje.
-      Svaka flesh kartica treba da ima pitanje (front) i odgovor (back).
-      Formatiraj odgovor kao JSON niz objekata sa svojstvima "front" i "back".
-      Sadržaj: ${content}
-    `;
-
-    const payload = {
-      contents: [{
-        parts: [{ text: prompt }]
-      }],
+  private async generateJson<T>(prompt: string, maxOutputTokens = 2048): Promise<T> {
+    const data = await this.fetchGemini('generateContent', {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: {
         temperature: 0.3,
         topK: 40,
         topP: 0.95,
-        maxOutputTokens: 1024,
+        maxOutputTokens,
+        responseMimeType: 'application/json',
       },
-    };
+    });
 
-    const data = await this.fetchGemini('generateContent', payload);
-    const textResponse = data.candidates[0].content.parts[0].text;
+    const textResponse = this.extractText(data);
 
-    // Try to parse JSON from the response
     try {
-      // Extract JSON from the response (assuming the response is just JSON or contains JSON)
-      const jsonMatch = textResponse.match(/\[.*\]/s);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
+      return JSON.parse(textResponse) as T;
+    } catch {
+      const jsonMatch = textResponse.match(/\[[\s\S]*\]|\{[\s\S]*\}/);
+      if (!jsonMatch) {
+        throw new Error('Gemini nije vratio validan JSON odgovor.');
       }
-      // If not, try to parse the whole thing
-      return JSON.parse(textResponse);
-    } catch (e) {
-      console.error('Failed to parse flashcards JSON:', e, textResponse);
-      // Fallback: return a simple array
-      return [{
-        front: 'Greška pri generisanju flesh kartica',
-        back: 'Molimo pokušajte ponovo.'
-      }];
+      return JSON.parse(jsonMatch[0]) as T;
     }
   }
 
-  async generateQuiz(content: string, numQuestions: number = 5): Promise<Array<{
+  async generateFlashcards(content: string): Promise<Array<{ front: string; back: string }>> {
+    return this.generateJson(
+      `Na osnovu sledećeg sadržaja kreiraj 5-10 flash kartica za učenje.
+Vrati ISKLJUČIVO JSON niz objekata oblika {"front":"pitanje","back":"odgovor"}.
+Sadržaj:
+${content}`,
+      2048
+    );
+  }
+
+  async generateQuiz(
+    content: string,
+    numQuestions = 5
+  ): Promise<Array<{
     question: string;
     options: string[];
     correctAnswer: number;
     explanation?: string;
   }>> {
-    const prompt = `
-      Na osnovu sledećeg sadržaja, kreiraj ${numQuestions} pitanja sa vierostrukim izborom.
-      Za svako pitanje, ponudi 4 opcije (A, B, C, D) i naznači tacan odgovor.
-      Takođe, uključi kratko objašnjenje zašto je odgovor tacan.
-      Formatiraj odgovor kao JSON niz objekata sa svojim svim:
-      "question": tekst pitanja,
-      "options": niz od 4 strings,
-      "correctAnswer": indeks tacnog odgovora (0-3),
-      "explanation": objašnjenje
-      Sadržaj: ${content}
-    `;
-
-    const payload = {
-      contents: [{
-        parts: [{ text: prompt }]
-      }],
-      generationConfig: {
-        temperature: 0.3,
-        topK: 40,
-        topP: 0.95,
-        maxOutputTokens: 2048,
-      },
-    };
-
-    const data = await this.fetchGemini('generateContent', payload);
-    const textResponse = data.candidates[0].content.parts[0].text;
-
-    try {
-      // Extract JSON from the response
-      const jsonMatch = textResponse.match(/\[.*\]/s);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
-      }
-      return JSON.parse(textResponse);
-    } catch (e) {
-      console.error('Failed to parse quiz JSON:', e, textResponse);
-      // Fallback
-      return [{
-        question: 'Greška pri generisanju kviza',
-        options: ['Pokušajte ponovo', '', '', ''],
-        correctAnswer: 0,
-        explanation: 'Došlo je do greške pri komunikaciji sa AI servisom.'
-      }];
-    }
+    return this.generateJson(
+      `Na osnovu sledećeg sadržaja kreiraj ${numQuestions} pitanja sa četiri ponuđena odgovora.
+Vrati ISKLJUČIVO JSON niz objekata oblika:
+{"question":"...","options":["A","B","C","D"],"correctAnswer":0,"explanation":"..."}
+correctAnswer mora biti indeks tačnog odgovora od 0 do 3.
+Sadržaj:
+${content}`,
+      4096
+    );
   }
 
   async summarizeLesson(content: string): Promise<string> {
-    const prompt = `
-      Sažmi sledeći sadržaj na način koji je lak shvatiti za učenika.
-      Fokusiraj se na najvažnije tačke i koncepte.
-      Sadržaj: ${content}
-    `;
+    return this.generate(
+      `Sažmi sledeći sadržaj tako da ga učenik lako razume. Fokusiraj se na najvažnije pojmove i činjenice.
 
-    const payload = {
-      contents: [{
-        parts: [{ text: prompt }]
-      }],
-      generationConfig: {
-        temperature: 0.5,
-        topK: 40,
-        topP: 0.95,
-        maxOutputTokens: 512,
-      },
-    };
-
-    const data = await this.fetchGemini('generateContent', payload);
-    return data.candidates[0].content.parts[0].text;
+Sadržaj:
+${content}`,
+      '',
+      1024
+    );
   }
 
   async extractKeyPoints(content: string): Promise<string[]> {
-    const prompt = `
-      Izvuci ključne tačke iz sledećeg sadržaja.
-      Vrati ih kao JSON niz strings.
-      Sadržaj: ${content}
-    `;
+    return this.generateJson(
+      `Izvuci najvažnije ključne tačke iz sledećeg sadržaja.
+Vrati ISKLJUČIVO JSON niz stringova.
 
-    const payload = {
-      contents: [{
-        parts: [{ text: prompt }]
-      }],
-      generationConfig: {
-        temperature: 0.3,
-        topK: 40,
-        topP: 0.95,
-        maxOutputTokens: 512,
-      },
-    };
-
-    const data = await this.fetchGemini('generateContent', payload);
-    const textResponse = data.candidates[0].content.parts[0].text;
-
-    try {
-      const jsonMatch = textResponse.match(/\[.*\]/s);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
-      }
-      return JSON.parse(textResponse);
-    } catch (e) {
-      console.error('Failed to parse key points JSON:', e, textResponse);
-      return ['Greška pri izvučenju ključnih tačkova'];
-    }
+Sadržaj:
+${content}`,
+      1024
+    );
   }
 }
